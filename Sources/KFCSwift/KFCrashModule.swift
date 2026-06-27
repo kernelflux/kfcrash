@@ -4,16 +4,17 @@ import KFService
 
 /// KFCrash service module — registers the default crash reporter with ServiceFactory.
 ///
-///     ServiceFactory.register(module: KFCrashModule(config: ...))
+///     KFCrashModule(config: ...).start()
 ///     ServiceFactory.resolve((any KFCrashService).self).crashedLastLaunch
-public struct KFCrashModule: KFModule {
+public struct KFCrashModule {
     private let config: KFCrashConfig
 
     public init(config: KFCrashConfig = KFCrashConfig()) {
         self.config = config
     }
 
-    public func register() {
+    /// Register KFCrashService with ServiceFactory.
+    public func start() {
         ServiceFactory.register((any KFCrashService).self) {
             let service = DefaultKFCrashService()
             try! service.install(config: config)
