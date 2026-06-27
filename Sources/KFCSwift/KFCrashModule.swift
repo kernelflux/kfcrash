@@ -1,20 +1,20 @@
 import KFCAPI
 import KFService
-@_exported import KFCAPI
 
-/// KFCrash service module — registers the default crash reporter with ServiceFactory.
+/// KFCrash module — implements ModuleProtocol for DAG startup.
 ///
-///     KFCrashModule(config: ...).start()
+///     try await Engine.run(graph: graph)
 ///     ServiceFactory.resolve((any KFCrashService).self).crashedLastLaunch
-public struct KFCrashModule {
+public final class KFCrashModule: ModuleProtocol {
+    public static var dependencies: [ModuleID] { [] }
+
     private let config: KFCrashConfig
 
     public init(config: KFCrashConfig = KFCrashConfig()) {
         self.config = config
     }
 
-    /// Register KFCrashService with ServiceFactory.
-    public func start() {
+    public func performInit() async {
         ServiceFactory.register((any KFCrashService).self) {
             let service = DefaultKFCrashService()
             try! service.install(config: config)
