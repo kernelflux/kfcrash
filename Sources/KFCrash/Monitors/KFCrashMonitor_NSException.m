@@ -1,0 +1,218 @@
+//
+//  KFCrashMonitor_NSException.m
+//
+//  Created by Karl Stenerud on 2012-01-28.
+//
+//  Copyright (c) 2012 Karl Stenerud. All rights reserved.
+//
+// Permission is hereby granted, free of charge, to any person obtaining a copy
+// of this software and associated documentation files (the "Software"), to deal
+// in the Software without restriction, including without limitation the rights
+// to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+// copies of the Software, and to permit persons to whom the Software is
+// furnished to do so, subject to the following conditions:
+//
+// The above copyright notice and this permission notice shall remain in place
+// in this source code.
+//
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+// IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+// AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+// OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+// THE SOFTWARE.
+//
+
+#import "KFCrashMonitor_NSException+Private.h"
+
+#import "KFCCompilerDefines.h"
+#import "KFCrashMonitorContext.h"
+#import "KFCrashMonitorHelper.h"
+#import "KFCID.h"
+#import "KFCStackCursor_Backtrace.h"
+#import "KFCStackCursor_SelfThread.h"
+#import "KFCThread.h"
+
+#import <Foundation/Foundation.h>
+#import <stdatomic.h>
+
+// #define KSLogger_LocalLevel TRACE
+#import "KFCLogger.h"
+
+// ============================================================================
+#pragma mark - Globals -
+// ============================================================================
+
+static struct {
+    _Atomic(KSCM_InstalledState) installedState;
+    atomic_bool isEnabled;
+
+    /** The exception handler that was in place before we installed ours. */
+    NSUncaughtExceptionHandler *previousUncaughtExceptionHandler;
+
+    KFCrash_ExceptionHandlerCallbacks callbacks;
+
+    OnNSExceptionHandlerEnabled *onEnabled;
+} g_state;
+
+static bool isEnabled(void) { return g_state.isEnabled && g_state.installedState == KSCM_Installed; }
+
+// ============================================================================
+#pragma mark - Callbacks -
+// ============================================================================
+
+static KS_NOINLINE void initStackCursor(KSStackCursor *cursor, NSException *exception, uintptr_t *callstack,
+                                        BOOL isUserReported) KS_KEEP_FUNCTION_IN_STACKTRACE
+{
+    // Use stacktrace from NSException if present,
+    // otherwise use current thread (can happen for user-reported exceptions).
+    NSArray *addresses = [exception callStackReturnAddresses];
+    NSUInteger numFrames = addresses.count;
+    if (numFrames != 0) {
+        callstack = malloc(numFrames * sizeof(*callstack));
+        for (NSUInteger i = 0; i < numFrames; i++) {
+            callstack[i] = (uintptr_t)[addresses[i] unsignedLongLongValue];
+        }
+        kssc_initWithBacktrace(cursor, callstack, (int)numFrames, 0);
+    } else {
+        /* Skip frames for user-reported:
+         * 1. `initStackCursor`
+         * 2. `handleException`
+         * 3. `customNSExceptionReporter`
+         * 4. `+[KFCrash reportNSException:logAllThreads:]`
+         *
+         * Skip frames for caught exceptions (unlikely scenario):
+         * 1. `initStackCursor`
+         * 2. `handleException`
+         * 3. `handleUncaughtException`
+         */
+        int const skipFrames = isUserReported ? 4 : 3;
+        kssc_initSelfThread(cursor, skipFrames);
+    }
+    KS_THWART_TAIL_CALL_OPTIMISATION
+}
+
+/** Our custom excepetion handler.
+ * Fetch the stack trace from the exception and write a report.
+ *
+ * @param exception The exception that was raised.
+ */
+static KS_NOINLINE void handleException(NSException *exception, BOOL isUserReported,
+                                        BOOL logAllThreads) KS_KEEP_FUNCTION_IN_STACKTRACE
+{
+    KFCLOG_DEBUG(@"Trapped exception %@", exception);
+    if (isEnabled()) {
+        // Gather this info before we require async-safety:
+        const char *exceptionName = exception.name.UTF8String;
+        const char *exceptionReason = exception.reason.UTF8String;
+        NS_VALID_UNTIL_END_OF_SCOPE NSString *userInfoString =
+            exception.userInfo != nil ? [NSString stringWithFormat:@"%@", exception.userInfo] : nil;
+        const char *userInfo = userInfoString.UTF8String;
+        KFCLOG_DEBUG(@"Filling out context.");
+        thread_t thisThread = (thread_t)kfcthread_self();
+        KSMachineContext machineContext = { 0 };
+        ksmc_getContextForThread(thisThread, &machineContext, true);
+        KSStackCursor cursor;
+        uintptr_t *callstack = NULL;
+        initStackCursor(&cursor, exception, callstack, isUserReported);
+
+        // Now start exception handling
+        KFCrash_MonitorContext *crashContext = g_state.callbacks.notify(
+            thisThread, (KFCrash_ExceptionHandlingRequirements) { .asyncSafety = false,
+                                                                  // User-reported exceptions are not considered fatal.
+                                                                  .isFatal = !isUserReported,
+                                                                  .shouldRecordAllThreads = logAllThreads != NO,
+                                                                  .shouldWriteReport = true });
+        if (crashContext->requirements.shouldExitImmediately) {
+            goto exit_immediately;
+        }
+
+        kfccm_fillMonitorContext(crashContext, kfccm_nsexception_getAPI());
+        crashContext->offendingMachineContext = &machineContext;
+        crashContext->registersAreValid = false;
+        crashContext->NSException.name = exceptionName;
+        crashContext->NSException.userInfo = userInfo;
+        crashContext->exceptionName = exceptionName;
+        crashContext->crashReason = exceptionReason;
+        crashContext->stackCursor = &cursor;
+        crashContext->currentSnapshotUserReported = isUserReported;
+
+        KFCLOG_DEBUG(@"Calling main crash handler.");
+        g_state.callbacks.handle(crashContext);
+
+    exit_immediately:
+        free(callstack);
+    }
+    if (!isUserReported && g_state.previousUncaughtExceptionHandler != NULL) {
+        KFCLOG_DEBUG(@"Calling original exception handler.");
+        g_state.previousUncaughtExceptionHandler(exception);
+    }
+    KS_THWART_TAIL_CALL_OPTIMISATION
+}
+
+static void customNSExceptionReporter(NSException *exception, BOOL logAllThreads) KS_KEEP_FUNCTION_IN_STACKTRACE
+{
+    handleException(exception, YES, logAllThreads);
+    KS_THWART_TAIL_CALL_OPTIMISATION
+}
+
+static void handleUncaughtException(NSException *exception) KS_KEEP_FUNCTION_IN_STACKTRACE
+{
+    handleException(exception, NO, YES);
+    KS_THWART_TAIL_CALL_OPTIMISATION
+}
+
+static void install(void)
+{
+    KSCM_InstalledState expectedState = KSCM_NotInstalled;
+    if (!atomic_compare_exchange_strong(&g_state.installedState, &expectedState, KSCM_Installed)) {
+        return;
+    }
+
+    KFCLOG_DEBUG(@"Backing up original handler.");
+    g_state.previousUncaughtExceptionHandler = NSGetUncaughtExceptionHandler();
+    KFCLOG_DEBUG(@"Setting new handler.");
+    NSSetUncaughtExceptionHandler(&handleUncaughtException);
+}
+
+// ============================================================================
+#pragma mark - API -
+// ============================================================================
+
+static void setEnabled(bool enabled)
+{
+    bool expectedState = !enabled;
+    if (!atomic_compare_exchange_strong(&g_state.isEnabled, &expectedState, enabled)) {
+        // We were already in the expected state
+        return;
+    }
+
+    if (enabled) {
+        install();
+        if (isEnabled() && g_state.onEnabled != NULL) {
+            g_state.onEnabled(handleUncaughtException, customNSExceptionReporter);
+        }
+    }
+}
+
+static const char *monitorId(void) { return "NSException"; }
+
+static KFCrashMonitorFlag monitorFlags(void) { return KFCrashMonitorFlagNone; }
+
+static void init(KFCrash_ExceptionHandlerCallbacks *callbacks) { g_state.callbacks = *callbacks; }
+
+KFCrashMonitorAPI *kfccm_nsexception_getAPI(void)
+{
+    static KFCrashMonitorAPI api = { 0 };
+    if (kfccma_initAPI(&api)) {
+        api.init = init;
+        api.monitorId = monitorId;
+        api.monitorFlags = monitorFlags;
+        api.setEnabled = setEnabled;
+        api.isEnabled = isEnabled;
+    }
+    return &api;
+}
+
+void kfccm_nsexception_setOnEnabledHandler(OnNSExceptionHandlerEnabled *onEnabled) { g_state.onEnabled = onEnabled; }

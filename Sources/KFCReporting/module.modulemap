@@ -1,0 +1,4 @@
+module KFCReporting {
+    umbrella "include"
+    export *
+}

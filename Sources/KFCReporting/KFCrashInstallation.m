@@ -1,0 +1,384 @@
+//
+//  KFCrashInstallation.m
+//
+//  Created by Karl Stenerud on 2013-02-10.
+//
+//  Copyright (c) 2012 Karl Stenerud. All rights reserved.
+//
+// Permission is hereby granted, free of charge, to any person obtaining a copy
+// of this software and associated documentation files (the "Software"), to deal
+// in the Software without restriction, including without limitation the rights
+// to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+// copies of the Software, and to permit persons to whom the Software is
+// furnished to do so, subject to the following conditions:
+//
+// The above copyright notice and this permission notice shall remain in place
+// in this source code.
+//
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+// IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+// AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+// OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+// THE SOFTWARE.
+//
+
+#import "KFCrashInstallation.h"
+#import <objc/runtime.h>
+#import "KFCCString.h"
+#import "KFCrash.h"
+#import "KFCrashConfiguration.h"
+#import "KFCrashInstallation+Private.h"
+#import "KFCrashReportFilterAlert.h"
+#import "KFCrashReportFilterBasic.h"
+// #import "KFCrashReportFilterDemangle.h"  // Demangle filter excluded from KFCrash build
+#import "KFCrashReportFilterDoctor.h"
+#import "KFCJSONCodecObjC.h"
+#import "KFCLogger.h"
+#import "KFCNSErrorHelper.h"
+
+/** Max number of properties that can be defined for writing to the report */
+#define kMaxProperties 500
+
+typedef struct {
+    const char *key;
+    const char *value;
+} ReportField;
+
+typedef struct {
+    // TODO: Remove in 3.0 - Deprecated callback field for backward compatibility
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+    KSReportWriteCallback userCrashCallback;
+#pragma clang diagnostic pop
+    KSCrashIsWritingReportCallback isWritingReportCallback;
+    int reportFieldsCount;
+    ReportField *reportFields[0];
+} CrashHandlerData;
+
+static CrashHandlerData *g_crashHandlerData;
+
+@interface KFCrashInstReportField : NSObject
+
+@property(nonatomic, readonly, assign) int index;
+@property(nonatomic, readonly, assign) ReportField *field;
+
+@property(nonatomic, readwrite, copy) NSString *key;
+@property(nonatomic, readwrite, strong) id value;
+
+@property(nonatomic, readwrite, strong) NSMutableData *fieldBacking;
+@property(nonatomic, readwrite, strong) KFCCString *keyBacking;
+@property(nonatomic, readwrite, strong) KFCCString *valueBacking;
+
+@end
+
+@implementation KFCrashInstReportField
+
++ (KFCrashInstReportField *)fieldWithIndex:(int)index
+{
+    return [(KFCrashInstReportField *)[self alloc] initWithIndex:index];
+}
+
+- (id)initWithIndex:(int)index
+{
+    if ((self = [super init])) {
+        _index = index;
+        _fieldBacking = [NSMutableData dataWithLength:sizeof(*self.field)];
+    }
+    return self;
+}
+
+- (ReportField *)field
+{
+    return (ReportField *)self.fieldBacking.mutableBytes;
+}
+
+- (void)setKey:(NSString *)key
+{
+    _key = key;
+    if (key == nil) {
+        self.keyBacking = nil;
+    } else {
+        self.keyBacking = [KFCCString stringWithString:key];
+    }
+    self.field->key = self.keyBacking.bytes;
+}
+
+- (void)setValue:(id)value
+{
+    if (value == nil) {
+        _value = nil;
+        self.valueBacking = nil;
+        return;
+    }
+
+    NSError *error = nil;
+    NSData *jsonData = [KFCJSONCodec encode:value
+                                   options:KSJSONEncodeOptionPretty | KSJSONEncodeOptionSorted
+                                     error:&error];
+    if (jsonData == nil) {
+        KFCLOG_ERROR(@"Could not set value %@ for property %@: %@", value, self.key, error);
+    } else {
+        _value = value;
+        self.valueBacking = [KFCCString stringWithData:jsonData];
+        self.field->value = self.valueBacking.bytes;
+    }
+}
+
+@end
+
+@interface KFCrashInstallation ()
+
+@property(nonatomic, readwrite, assign) int nextFieldIndex;
+@property(nonatomic, readonly, assign) CrashHandlerData *crashHandlerData;
+@property(nonatomic, readwrite, strong) NSMutableData *crashHandlerDataBacking;
+@property(nonatomic, readwrite, strong) NSMutableDictionary *fields;
+@property(nonatomic, readwrite, strong) KFCrashReportFilterPipeline *prependedFilters;
+
+@end
+
+@implementation KFCrashInstallation
+
+- (instancetype)init
+{
+    if ((self = [super init])) {
+        _isDemangleEnabled = YES;
+        _isDoctorEnabled = YES;
+        _crashHandlerDataBacking =
+            [NSMutableData dataWithLength:sizeof(*self.crashHandlerData) +
+                                          sizeof(*self.crashHandlerData->reportFields) * kMaxProperties];
+        _fields = [NSMutableDictionary dictionary];
+        _prependedFilters = [KFCrashReportFilterPipeline new];
+    }
+    return self;
+}
+
+- (void)dealloc
+{
+    KFCrash *handler = [KFCrash sharedInstance];
+    @synchronized(handler) {
+        if (g_crashHandlerData == self.crashHandlerData) {
+            g_crashHandlerData = NULL;
+            // FIXME: Mutating the inner state
+            //            handler.onCrash = NULL;
+        }
+    }
+}
+
+- (CrashHandlerData *)crashHandlerData
+{
+    return (CrashHandlerData *)self.crashHandlerDataBacking.mutableBytes;
+}
+
+- (KFCrashInstReportField *)reportFieldForProperty:(NSString *)propertyName
+{
+    KFCrashInstReportField *field = [self.fields objectForKey:propertyName];
+    if (field == nil) {
+        field = [KFCrashInstReportField fieldWithIndex:self.nextFieldIndex];
+        self.nextFieldIndex++;
+        self.crashHandlerData->reportFieldsCount = self.nextFieldIndex;
+        self.crashHandlerData->reportFields[field.index] = field.field;
+        [self.fields setObject:field forKey:propertyName];
+    }
+    return field;
+}
+
+- (void)reportFieldForProperty:(NSString *)propertyName setKey:(id)key
+{
+    KFCrashInstReportField *field = [self reportFieldForProperty:propertyName];
+    field.key = key;
+}
+
+- (void)reportFieldForProperty:(NSString *)propertyName setValue:(id)value
+{
+    KFCrashInstReportField *field = [self reportFieldForProperty:propertyName];
+    field.value = value;
+}
+
+- (BOOL)validateSetupWithError:(NSError **)error
+{
+    // In the base class there is no properties to validate.
+    return YES;
+}
+
+- (NSString *)makeKeyPath:(NSString *)keyPath
+{
+    if ([keyPath length] == 0) {
+        return keyPath;
+    }
+    BOOL isAbsoluteKeyPath = [keyPath length] > 0 && [keyPath characterAtIndex:0] == '/';
+    return isAbsoluteKeyPath ? keyPath : [@"user/" stringByAppendingString:keyPath];
+}
+
+- (NSArray *)makeKeyPaths:(NSArray *)keyPaths
+{
+    if ([keyPaths count] == 0) {
+        return keyPaths;
+    }
+    NSMutableArray *result = [NSMutableArray arrayWithCapacity:[keyPaths count]];
+    for (NSString *keyPath in keyPaths) {
+        [result addObject:[self makeKeyPath:keyPath]];
+    }
+    return result;
+}
+
+// TODO: Remove in 3.0 - Deprecated onCrash property methods for backward compatibility
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+- (KSReportWriteCallback)onCrash
+{
+    @synchronized(self) {
+        return self.crashHandlerData->userCrashCallback;
+    }
+}
+
+- (void)setOnCrash:(KSReportWriteCallback)onCrash
+{
+    @synchronized(self) {
+        self.crashHandlerData->userCrashCallback = onCrash;
+    }
+}
+#pragma clang diagnostic pop
+
+- (KSCrashIsWritingReportCallback)isWritingReportCallback
+{
+    @synchronized(self) {
+        return self.crashHandlerData->isWritingReportCallback;
+    }
+}
+
+- (void)setIsWritingReportCallback:(KSCrashIsWritingReportCallback)isWritingReportCallback
+{
+    @synchronized(self) {
+        self.crashHandlerData->isWritingReportCallback = isWritingReportCallback;
+    }
+}
+
+static void isWritingReportCallback(const KFCrash_ExceptionHandlingPlan *plan,
+                                    const struct KFCrashReportWriter *_Nonnull writer)
+{
+    CrashHandlerData *crashHandlerData = g_crashHandlerData;
+    if (crashHandlerData == NULL) {
+        return;
+    }
+    for (int i = 0; i < crashHandlerData->reportFieldsCount; i++) {
+        ReportField *field = crashHandlerData->reportFields[i];
+        if (field->key != NULL && field->value != NULL) {
+            writer->addJSONElement(writer, field->key, field->value, true);
+        }
+    }
+
+    if (crashHandlerData->isWritingReportCallback != NULL) {
+        crashHandlerData->isWritingReportCallback(plan, writer);
+    } else if (crashHandlerData->userCrashCallback != NULL) {
+        // TODO: Remove in 3.0 - Deprecated callback invocation for backward compatibility
+        crashHandlerData->userCrashCallback(writer);
+    }
+}
+
+- (BOOL)installWithConfiguration:(KFCrashConfiguration *)configuration error:(NSError **)error
+{
+    KFCrash *handler = [KFCrash sharedInstance];
+    @synchronized(handler) {
+        g_crashHandlerData = self.crashHandlerData;
+
+        configuration.isWritingReportCallback = isWritingReportCallback;
+
+        NSError *installError = nil;
+        BOOL success = [handler installWithConfiguration:configuration error:&installError];
+
+        if (success == NO && error != NULL) {
+            *error = installError;
+        }
+
+        return success;
+    }
+}
+
+- (void)sendAllReportsWithCompletion:(KFCrashReportFilterCompletion)onCompletion
+{
+    NSError *error = nil;
+    if ([self validateSetupWithError:&error] == NO) {
+        if (onCompletion != nil) {
+            onCompletion(nil, error);
+        }
+        return;
+    }
+
+    id<KFCrashReportFilter> sink = [self sink];
+    if (sink == nil) {
+        onCompletion(nil,
+                     [KSNSErrorHelper errorWithDomain:[[self class] description]
+                                                 code:0
+                                          description:@"Sink was nil (subclasses must implement method \"sink\")"]);
+        return;
+    }
+
+    KFCrashReportStore *store = [KFCrash sharedInstance].reportStore;
+    if (store == nil) {
+        onCompletion(
+            nil, [KSNSErrorHelper
+                     errorWithDomain:[[self class] description]
+                                code:0
+                         description:@"Reporting is not allowed before the call of `installWithConfiguration:error:`"]);
+        return;
+    }
+
+    NSMutableArray *installationFilters = [NSMutableArray array];
+    // Demangle filter excluded from KFCrash build
+    // if (self.isDemangleEnabled) {
+    //     [installationFilters addObject:[KFCrashReportFilterDemangle new]];
+    // }
+    if (self.isDoctorEnabled) {
+        [installationFilters addObject:[KFCrashReportFilterDoctor new]];
+    }
+    [installationFilters addObjectsFromArray:@[
+        self.prependedFilters,
+        sink,
+    ]];
+    store.sink = [[KFCrashReportFilterPipeline alloc] initWithFilters:installationFilters];
+
+    [store sendAllReportsWithCompletion:onCompletion];
+}
+
+- (void)addPreFilter:(id<KFCrashReportFilter>)filter
+{
+    [self.prependedFilters addFilter:filter];
+}
+
+- (id<KFCrashReportFilter>)sink
+{
+    [self doesNotRecognizeSelector:_cmd];
+    __builtin_unreachable();
+}
+
+- (void)addConditionalAlertWithTitle:(NSString *)title
+                             message:(NSString *)message
+                           yesAnswer:(NSString *)yesAnswer
+                            noAnswer:(NSString *)noAnswer
+{
+    [self addPreFilter:[[KFCrashReportFilterAlert alloc] initWithTitle:title
+                                                               message:message
+                                                             yesAnswer:yesAnswer
+                                                              noAnswer:noAnswer]];
+
+    KFCrashReportStore *store = [KFCrash sharedInstance].reportStore;
+    if (store.reportCleanupPolicy == KFCrashReportCleanupPolicyOnSuccess) {
+        // Better to delete always, or else the user will keep getting nagged
+        // until he presses "yes"!
+        store.reportCleanupPolicy = KFCrashReportCleanupPolicyAlways;
+    }
+}
+
+- (void)addUnconditionalAlertWithTitle:(NSString *)title
+                               message:(NSString *)message
+                     dismissButtonText:(NSString *)dismissButtonText
+{
+    [self addPreFilter:[[KFCrashReportFilterAlert alloc] initWithTitle:title
+                                                               message:message
+                                                             yesAnswer:dismissButtonText
+                                                              noAnswer:nil]];
+}
+
+@end
