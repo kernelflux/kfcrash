@@ -17,7 +17,7 @@ public final class KFCrashModule: ModuleProtocol {
     public func performInit() async {
         ServiceFactory.register((any KFCrashService).self) {
             let service = DefaultKFCrashService()
-            try! service.install(config: config)
+            try! service.install(config: self.config)
             return service
         }
     }
