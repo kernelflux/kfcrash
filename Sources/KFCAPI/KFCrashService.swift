@@ -17,9 +17,10 @@ public protocol KFCrashService: AnyObject {
     /// Total active (foreground) time elapsed since the last crash.
     var activeDurationSinceLastCrash: TimeInterval { get }
 
-    /// Install the crash reporter with the given configuration.
-    /// Once installed, the crash reporter remains active for the lifetime of the process.
-    func install(config: KFCrashConfig) throws
+    func initialize(config: KFCrashConfig) throws
+
+    /// Tear down the crash reporter.
+    func unInit()
 
     /// Report a custom user exception.
     /// - Parameters:

@@ -3,24 +3,26 @@ import KFCrash
 import KFCAPI
 
 /// Default crash reporting implementation — bridges the ObjC KFCrash engine.
-final class DefaultKFCrashService: KFCrashService {
+public final class DefaultKFCrashService: KFCrashService {
     private var engine: KFCrash { KFCrash.shared }
     private var reportStore: CrashReportStore { engine.reportStore! }
     private var privacyRedactFields: [String] = []
 
-    var crashedLastLaunch: Bool {
+    public var crashedLastLaunch: Bool {
         engine.crashedLastLaunch
     }
 
-    var launchesSinceLastCrash: Int { engine.launchesSinceLastCrash }
+    public var launchesSinceLastCrash: Int { engine.launchesSinceLastCrash }
 
-    var sessionsSinceLastCrash: Int { engine.sessionsSinceLastCrash }
+    public var sessionsSinceLastCrash: Int { engine.sessionsSinceLastCrash }
 
-    var sessionsSinceLaunch: Int { engine.sessionsSinceLaunch }
+    public var sessionsSinceLaunch: Int { engine.sessionsSinceLaunch }
 
-    var activeDurationSinceLastCrash: TimeInterval { engine.activeDurationSinceLastCrash }
+    public var activeDurationSinceLastCrash: TimeInterval { engine.activeDurationSinceLastCrash }
 
-    func install(config: KFCrashConfig) throws {
+    public init() {}
+
+    public func initialize(config: KFCrashConfig) throws {
         privacyRedactFields = config.privacyRedactFields
 
         let objcConfig = KFCrashConfiguration()
@@ -39,7 +41,7 @@ final class DefaultKFCrashService: KFCrashService {
         try engine.install(with: objcConfig)
     }
 
-    func reportUserException(
+    public func reportUserException(
         name: String,
         reason: String?,
         language: String?,
@@ -57,7 +59,7 @@ final class DefaultKFCrashService: KFCrashService {
         )
     }
 
-    func reportError(_ error: Error, terminateProgram: Bool) {
+    public func reportError(_ error: Error, terminateProgram: Bool) {
         let nsError = error as NSError
         let name = "\(nsError.domain).\(nsError.code)"
         reportUserException(
@@ -71,13 +73,13 @@ final class DefaultKFCrashService: KFCrashService {
 
     // MARK: - Report management
 
-    var reportCount: Int { reportStore.reportCount }
+    public var reportCount: Int { reportStore.reportCount }
 
-    var reportIDs: [String] {
+    public var reportIDs: [String] {
         reportStore.reportIDs.map { $0.stringValue }
     }
 
-    func report(for id: String) -> String? {
+    public func report(for id: String) -> String? {
         guard let reportID = Int64(id),
               var json = reportStore.reportString(for: reportID) else { return nil }
         if !privacyRedactFields.isEmpty, let data = json.data(using: .utf8),
@@ -93,51 +95,55 @@ final class DefaultKFCrashService: KFCrashService {
         return json
     }
 
-    func shareReportURL(for id: String) -> URL? {
+    public func shareReportURL(for id: String) -> URL? {
         guard let json = report(for: id) else { return nil }
         return writeTempReport(json: json, name: "crash_report_\(id).json")
     }
 
-    func allReportURLs() -> [URL] {
+    public func allReportURLs() -> [URL] {
         reportIDs.compactMap { shareReportURL(for: $0) }
     }
 
-    func deleteReport(_ id: String) {
+    public func deleteReport(_ id: String) {
         guard let reportID = Int64(id) else { return }
         reportStore.deleteReport(with: reportID)
     }
 
-    func deleteAllReports() {
+    public func deleteAllReports() {
         reportStore.deleteAllReports()
     }
 
     // MARK: - Breadcrumbs
 
-    func addBreadcrumb(_ message: String) {
+    public func addBreadcrumb(_ message: String) {
         engine.addBreadcrumb(message)
     }
 
-    func clearBreadcrumbs() {
+    public func clearBreadcrumbs() {
         engine.clearBreadcrumbs()
     }
 
     // MARK: - Custom Keys
 
-    func setCustomValue(_ value: String, forKey key: String) {
+    public func setCustomValue(_ value: String, forKey key: String) {
         engine.setCustomValue(value, forKey: key)
     }
 
-    func removeCustomKey(_ key: String) {
+    public func removeCustomKey(_ key: String) {
         engine.removeCustomKey(key)
     }
 
-    func clearCustomKeys() {
+    public func clearCustomKeys() {
         engine.clearCustomKeys()
+    }
+
+    public func unInit() {
+        // Crash handlers stay installed for the process lifetime.
     }
 
     // MARK: - User Identifier
 
-    func setUserIdentifier(_ identifier: String?) {
+    public func setUserIdentifier(_ identifier: String?) {
         engine.setUserIdentifier(identifier)
     }
 
