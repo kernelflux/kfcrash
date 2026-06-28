@@ -26,7 +26,7 @@ let package = Package(
         ),
     ],
     dependencies: [
-        .package(path: "../kfservice"),
+        .package(url: "https://github.com/kernelflux/kfservice.git", from: "1.0.0"),
     ],
     targets: [
         // C/C++ core (Core + RecordingCore merged)
