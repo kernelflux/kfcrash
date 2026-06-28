@@ -78,6 +78,10 @@ public struct KFCrashConfig {
     /// Supports dot-notation for nested paths (e.g. `system.processPath`).
     public var privacyRedactFields: [String]
 
+    /// Forward crash reports to a third-party SDK after local write.
+    /// Set nil (default) for no forwarding.
+    public var sink: (any CrashReportSink)?
+
     public init(
         monitorTypes: CrashMonitorTypes = .productionSafeMinimal,
         maxReportCount: Int = 5,
@@ -90,7 +94,8 @@ public struct KFCrashConfig {
         enableMemoryIntrospection: Bool = false,
         doNotIntrospectClasses: [String]? = nil,
         chainToExistingHandlers: Bool = true,
-        privacyRedactFields: [String] = []
+        privacyRedactFields: [String] = [],
+        sink: (any CrashReportSink)? = nil
     ) {
         self.monitorTypes = monitorTypes
         self.maxReportCount = maxReportCount
@@ -104,5 +109,6 @@ public struct KFCrashConfig {
         self.doNotIntrospectClasses = doNotIntrospectClasses
         self.chainToExistingHandlers = chainToExistingHandlers
         self.privacyRedactFields = privacyRedactFields
+        self.sink = sink
     }
 }

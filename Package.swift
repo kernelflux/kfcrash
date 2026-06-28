@@ -24,9 +24,20 @@ let package = Package(
             name: "KFCSwift",
             targets: ["KFCSwift"]
         ),
+        .library(
+            name: "KFCrashChina",
+            targets: ["KFCrash", "KFCReporting", "BuglyCrashAdapter"]
+        ),
+        .library(
+            name: "KFCrashGlobal",
+            targets: ["KFCrash", "KFCReporting", "FirebaseCrashlyticsAdapter"]
+        ),
     ],
     dependencies: [
         .package(url: "https://github.com/kernelflux/kfservice.git", from: "1.0.0"),
+        .package(url: "https://github.com/firebase/firebase-ios-sdk.git", from: "12.15.0"),
+        // Bugly SDK mirror (xcframework binary, see bugly-spm repo)
+        .package(url: "https://github.com/kernelflux/bugly-spm.git", from: "1.0.0"),
     ],
     targets: [
         // C/C++ core (Core + RecordingCore merged)
@@ -96,6 +107,32 @@ let package = Package(
                 .product(name: "KFService", package: "KFService"),
             ],
             path: "Sources/KFCSwift"
+        ),
+
+        // MARK: - China adapter (Bugly)
+        //
+        // Depends on bugly-spm mirror repo:
+        //   https://github.com/kernelflux/bugly-spm
+        // Contains Bugly.xcframework from Bugly 2.8.2.8
+
+        .target(
+            name: "BuglyCrashAdapter",
+            dependencies: [
+                "KFCAPI",
+                .product(name: "Bugly", package: "bugly-spm"),
+            ],
+            path: "Sources/Adapters/BuglyCrash"
+        ),
+
+        // MARK: - Global adapter (Firebase)
+
+        .target(
+            name: "FirebaseCrashlyticsAdapter",
+            dependencies: [
+                "KFCAPI",
+                .product(name: "FirebaseCrashlytics", package: "firebase-ios-sdk"),
+            ],
+            path: "Sources/Adapters/FirebaseCrashlytics"
         ),
     ],
     cxxLanguageStandard: .gnucxx11
