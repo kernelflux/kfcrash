@@ -4,8 +4,6 @@ Production-grade iOS crash reporting — signal/Mach/NSException monitors, on-di
 
 Built on [KSCrash](https://github.com/kstenerud/KSCrash) 2.5.1, restructured and adapted for the KernelFlux component library.
 
-[中文文档](README_CN.md)
-
 ## Features
 
 - **Multi-monitor crash capture** — Mach exceptions, POSIX signals, C++ exceptions, NSExceptions, deadlock watchdog
@@ -15,7 +13,7 @@ Built on [KSCrash](https://github.com/kstenerud/KSCrash) 2.5.1, restructured and
 - **Breadcrumbs** — lightweight event trail captured in crash reports for forensic context
 - **Custom keys** — attach arbitrary key-value pairs to crash reports
 - **Chaining** — forward exceptions to existing handlers (Firebase Crashlytics, Bugly) after capturing
-- **KFService integration** — `KFCrashModule` auto-registers with the service manager at high priority
+- **KFService integration** — `KFCrashAssembly` + `KFCrashStartupModule` for DI and startup orchestration
 
 ## Installation
 
@@ -38,7 +36,7 @@ Then add the target you need:
 | `KFCrash` | ObjC | Recording layer: monitor wrappers, report store | `KFCCore` |
 | `KFCReporting` | ObjC | Reporting pipeline: filters, sinks, installations | `KFCrash` |
 | `KFCAPI` | Swift | Protocol-only: `KFCrashService`, `KFCrashConfig` | nothing |
-| `KFCSwift` | Swift | Swift impl + KFService registration | `KFCrash`, `KFCReporting`, `KFCAPI`, `KFService` |
+| `KFCSwift` | Swift | Swift impl + KFService integration | `KFCrash`, `KFCReporting`, `KFCAPI`, `KFService` |
 
 ## Architecture
 
@@ -48,7 +46,7 @@ KFCrash
 ├── KFCrash/             ← ObjC (monitor wrappers, report store, KFCrashConfiguration)
 ├── KFCReporting/        ← ObjC (filters, sinks, installation strategies)
 ├── KFCAPI/              ← Swift protocol (KFCrashService) + config (KFCrashConfig)
-└── KFCSwift/            ← DefaultKFCrashService, KFCrashModule
+└── KFCSwift/            ← DefaultKFCrashService, KFCrashAssembly, KFCrashStartupModule
 ```
 
 ## Quick Start
@@ -59,11 +57,25 @@ KFCrash
 import KFService
 import KFCSwift
 
-// Register at app launch — priority 10 ensures it boots first
-KFServiceManager.register(module: KFCrashModule())
+// In App init — register via assembly
+ServiceContainer.shared.install(KFCrashAssembly())
 
-// Query crash state
-let service = KFServiceManager.resolve((any KFCrashService).self)
+// In App.task — run startup (high priority boots early)
+try await Engine.run(modules: [
+    KFCrashStartupModule(config: KFCrashConfig(
+        monitorTypes: .productionSafeMinimal,
+        maxReportCount: 20,
+        addConsoleLogToReport: true
+    )),
+])
+```
+
+Resolve and use anywhere:
+
+```swift
+let service = try ServiceContainer.shared.resolve(KFCrashService.self)
+
+// Check crash state
 if service.crashedLastLaunch {
     print("App crashed on previous launch")
 }
@@ -84,7 +96,7 @@ import KFCSwift
 import KFCAPI
 
 let service = DefaultKFCrashService()
-try service.install(config: KFCrashConfig(
+try service.initialize(config: KFCrashConfig(
     monitorTypes: .fatal,
     maxReportCount: 10,
     addConsoleLogToReport: true
@@ -130,9 +142,12 @@ public protocol KFCrashService: AnyObject {
     var crashedLastLaunch: Bool { get }
     var launchesSinceLastCrash: Int { get }
     var sessionsSinceLastCrash: Int { get }
+    var sessionsSinceLaunch: Int { get }
+    var activeDurationSinceLastCrash: TimeInterval { get }
 
-    // Installation
-    func install(config: KFCrashConfig) throws
+    // Lifecycle
+    func initialize(config: KFCrashConfig) throws
+    func unInit()
 
     // User reports
     func reportUserException(name:reason:language:stackTrace:terminateProgram:)
@@ -181,17 +196,24 @@ let config = KFCrashConfig(
 // these fields stripped before the JSON leaves memory.
 ```
 
-## KFCrashModule
+## KFService Integration
+
+| Type | Role |
+|------|------|
+| `KFCrashAssembly` | Implements `ServiceAssembly` — registers `KFCrashService` → `DefaultKFCrashService` |
+| `KFCrashStartupModule` | Implements `StartupModule` — provides `KFCrashStartupTask` with config |
 
 ```swift
-KFServiceManager.register(module: KFCrashModule(
-    config: KFCrashConfig(
-        monitorTypes: .fatal,
-        maxReportCount: 10,
-        privacyRedactFields: ["user.name", "user.email"]
-    )
-))
-// priority: 10 — boots before KV store, logger, and network
+// Install (sync, in App init)
+ServiceContainer.shared.install(KFCrashAssembly())
+
+// Override with custom impl — last write wins
+ServiceContainer.shared.register(KFCrashService.self) { MyCustomCrashService() }
+
+// Run (async, in App.task) — priority 10 boots before KV, logger, network
+try await Engine.run(modules: [
+    KFCrashStartupModule(config: KFCrashConfig(monitorTypes: .fatal, maxReportCount: 10)),
+])
 ```
 
 ## Source Layout
@@ -202,7 +224,7 @@ Sources/
 ├── KFCrash/              ← ObjC (KFCrash, KFCrashConfiguration, monitor wrappers)
 ├── KFCReporting/         ← ObjC (filters, sinks, KFCrashInstallationStandard, etc.)
 ├── KFCAPI/               ← KFCrashService protocol, KFCrashConfig, CrashMonitorTypes
-└── KFCSwift/             ← DefaultKFCrashService, KFCrashModule
+└── KFCSwift/             ← DefaultKFCrashService, KFCrashAssembly, KFCrashStartupModule
 ```
 
 ## License
