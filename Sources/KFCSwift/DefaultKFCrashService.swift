@@ -7,6 +7,7 @@ public final class DefaultKFCrashService: KFCrashService {
     private var engine: KFCrash { KFCrash.shared }
     private var reportStore: CrashReportStore { engine.reportStore! }
     private var privacyRedactFields: [String] = []
+    private var config: KFCrashConfig?
 
     public var crashedLastLaunch: Bool {
         engine.crashedLastLaunch
@@ -23,6 +24,7 @@ public final class DefaultKFCrashService: KFCrashService {
     public init() {}
 
     public func initialize(config: KFCrashConfig) throws {
+        self.config = config
         privacyRedactFields = config.privacyRedactFields
 
         let objcConfig = KFCrashConfiguration()
@@ -57,6 +59,18 @@ public final class DefaultKFCrashService: KFCrashService {
             logAllThreads: true,
             terminateProgram: terminateProgram
         )
+
+        if let sink = config?.sink {
+            let report = CrashReport(
+                reportID: UUID().uuidString,
+                name: name,
+                reason: reason,
+                language: language,
+                stackTrace: stackTrace ?? [],
+                timestamp: Date()
+            )
+            sink.didCapture(report: report)
+        }
     }
 
     public func reportError(_ error: Error, terminateProgram: Bool) {
