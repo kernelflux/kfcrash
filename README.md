@@ -26,7 +26,7 @@ https://github.com/kernelflux/kfcrash.git
 Or in `Package.swift`:
 
 ```swift
-.package(url: "https://github.com/kernelflux/kfcrash.git", from: "1.0.0")
+.package(url: "https://github.com/kernelflux/kfcrash.git", from: "1.0.1")
 ```
 
 Then add the target you need:
