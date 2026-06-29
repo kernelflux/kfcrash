@@ -35,8 +35,10 @@ Then add the target you need:
 |---------|----------|-------------|------------|
 | `KFCrash` | ObjC | Recording layer: monitor wrappers, report store | `KFCCore` |
 | `KFCReporting` | ObjC | Reporting pipeline: filters, sinks, installations | `KFCrash` |
-| `KFCAPI` | Swift | Protocol-only: `KFCrashService`, `KFCrashConfig` | nothing |
+| `KFCAPI` | Swift | Protocol-only: `KFCrashService`, `KFCrashConfig`, `CrashReportSink` | nothing |
 | `KFCSwift` | Swift | Swift impl + KFService integration | `KFCrash`, `KFCReporting`, `KFCAPI`, `KFService` |
+| `KFCrashChina` | Swift | `KFCSwift` + `BuglyCrashAdapter` (Bugly 2.6.1) | `bugly-spm` → `Bugly` |
+| `KFCrashGlobal` | Swift | `KFCSwift` + `FirebaseCrashlyticsAdapter` (Firebase 12.15.0) | `firebase-ios-sdk` → `FirebaseCrashlytics` |
 
 ## Architecture
 
@@ -120,6 +122,7 @@ public struct KFCrashConfig {
     var enableMemoryIntrospection: Bool
     var doNotIntrospectClasses: [String]?
     var chainToExistingHandlers: Bool           // default: true
+    var sink: (any CrashReportSink)?           // third-party forwarding for user-reported exceptions
     var privacyRedactFields: [String]           // dot-notation key paths
 }
 ```
@@ -186,6 +189,72 @@ service.reportError(MyError.invalidState, terminateProgram: false)
 service.reportError(MyError.corruptDatabase, terminateProgram: true)
 ```
 
+## CrashReportSink — Third-party Forwarding
+
+KFCrash handles native crashes (Mach exceptions, signals, NSExceptions) through a handler chain — make sure commercial SDKs initialize **before** KFCrash. The `CrashReportSink` protocol is for **user-reported exceptions** only (`reportUserException` / `reportError`).
+
+```swift
+// Bugly initializes first (installs its NSException handler)
+// KFCrash initializes second (saves Bugly's handler, chains to it)
+
+var config = KFCrashConfig(...)
+config.sink = BuglyCrashAdapter(appId: "YOUR_BUGLY_APP_ID", channel: "App Store")
+```
+
+Each adapter initializes the underlying SDK internally — just pass credentials.
+
+### BuglyCrashAdapter (China)
+
+```swift
+import KFCAPI
+import Bugly
+
+// config.sink = BuglyCrashAdapter(appId:id, channel:"App Store", debug:false)
+```
+
+Forwards user-reported exceptions via `Bugly.reportException(withCategory:name:reason:callStack:extraInfo:terminateApp:)`.  
+Dependency: `bugly-spm` → `Bugly` (2.6.1).
+
+### FirebaseCrashlyticsAdapter (Global)
+
+```swift
+import KFCAPI
+import FirebaseCrashlytics
+
+// config.sink = FirebaseCrashlyticsAdapter()
+```
+
+Forwards user-reported exceptions via `Crashlytics.crashlytics().record(exceptionModel:)`.  
+Dependency: `firebase-ios-sdk` → `FirebaseCrashlytics` (12.15.0).
+
+> Firebase itself must be configured via `FirebaseApp.configure()` in the host app before use.
+
+### Initialization Order
+
+```
+1. Bugly.start(...)           ← commercial SDK first (installs NSException handler)
+2. KFCrash.install()          ← KFCrash second (saves previous handler, chains to it)
+```
+
+This ensures native crashes are captured by both systems without overwriting each other's handlers.
+
+### User-Reported Exception Flow
+
+```
+App code
+   │
+   ▼
+KFCrash.reportUserException(...)          ← user-reported exception
+   │
+   ├─► Write JSON report to KFCrash store ← always
+   │
+   └─► CrashReportSink.didCapture(...)    ← forwarded to adapter
+          │
+          ├─► Bugly.reportException(...)   ← if KFCrashChina
+          │
+          └─► Crashlytics.record(...)     ← if KFCrashGlobal
+```
+
 ### Privacy Redaction
 
 ```swift
@@ -223,8 +292,11 @@ Sources/
 ├── KFCCore/              ← C/C++ (signal/Mach/NSException handlers, state, symbolication)
 ├── KFCrash/              ← ObjC (KFCrash, KFCrashConfiguration, monitor wrappers)
 ├── KFCReporting/         ← ObjC (filters, sinks, KFCrashInstallationStandard, etc.)
-├── KFCAPI/               ← KFCrashService protocol, KFCrashConfig, CrashMonitorTypes
-└── KFCSwift/             ← DefaultKFCrashService, KFCrashAssembly, KFCrashStartupModule
+├── KFCAPI/               ← KFCrashService protocol, KFCrashConfig, CrashReportSink, CrashMonitorTypes
+├── KFCSwift/             ← DefaultKFCrashService, KFCrashAssembly, KFCrashStartupModule
+└── Adapters/
+    ├── BuglyCrash/        ← BuglyCrashAdapter (KFCrashChina)
+    └── FirebaseCrashlytics/ ← FirebaseCrashlyticsAdapter (KFCrashGlobal)
 ```
 
 ## License
