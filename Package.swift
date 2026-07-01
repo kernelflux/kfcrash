@@ -34,10 +34,9 @@ let package = Package(
         ),
     ],
     dependencies: [
-        .package(path: "../kfservice"),
+        .package(url: "https://github.com/kernelflux/kfservice.git", from: "1.0.1"),
         .package(url: "https://github.com/firebase/firebase-ios-sdk.git", from: "12.15.0"),
-        // Bugly SDK mirror (xcframework binary, see bugly-spm repo)
-        .package(path: "../../bugly-spm"),
+        .package(url: "https://github.com/kernelflux/bugly-spm.git", from: "1.0.0"),
     ],
     targets: [
         // C/C++ core (Core + RecordingCore merged)
