@@ -13,7 +13,7 @@ public struct BuglyCrashAdapter: CrashReportSink {
     ///   - debug: 是否开启调试模式，默认 false
     public init(appId: String, channel: String? = nil, debug: Bool = false) {
         let config = BuglyConfig()
-        config.channel = channel
+        if let channel { config.channel = channel }
         config.debugMode = debug
         Bugly.start(withAppId: appId, config: config)
     }
